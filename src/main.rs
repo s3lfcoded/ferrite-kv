@@ -23,6 +23,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "FerriteKV 0.1.0\n\
+                     High-Performance In-Memory Key-Value Store (RESP2)\n\n\
+                     USAGE:\n    \
+                         ferrite-kv [OPTIONS]\n\n\
+                     OPTIONS:\n    \
+                         -p, --port <PORT>       Port to listen on (default: 6379)\n    \
+                             --aof [PATH]        Enable Append-Only File persistence (default: appendonly.aof)\n    \
+                         -h, --help              Print help information\n    \
+                         -v, --version           Print version information"
+                );
+                return Ok(());
+            }
+            "-v" | "--version" => {
+                println!("FerriteKV 0.1.0");
+                return Ok(());
+            }
             "-p" | "--port" => {
                 if i + 1 < args.len() {
                     port = args[i + 1].parse().unwrap_or(6379);

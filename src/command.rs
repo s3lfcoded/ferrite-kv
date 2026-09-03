@@ -37,6 +37,9 @@ pub enum Command {
     FlushDb,
     Info,
     Command,
+    Select(u32),
+    Client,
+    Quit,
     Unknown(String),
 }
 
@@ -112,6 +115,9 @@ impl Command {
                         let secs: u64 = extract_string(&items[idx + 1])?
                             .parse()
                             .map_err(|_| "ERR value is not an integer or out of range")?;
+                        if secs == 0 {
+                            return Err("ERR invalid expire time in 'set' command".into());
+                        }
                         ttl = Some(Duration::from_secs(secs));
                         idx += 2;
                     } else if opt == "PX" {
@@ -121,6 +127,9 @@ impl Command {
                         let millis: u64 = extract_string(&items[idx + 1])?
                             .parse()
                             .map_err(|_| "ERR value is not an integer or out of range")?;
+                        if millis == 0 {
+                            return Err("ERR invalid expire time in 'set' command".into());
+                        }
                         ttl = Some(Duration::from_millis(millis));
                         idx += 2;
                     } else {
@@ -235,6 +244,17 @@ impl Command {
             "FLUSHDB" => Ok(Command::FlushDb),
             "INFO" => Ok(Command::Info),
             "COMMAND" => Ok(Command::Command),
+            "SELECT" => {
+                if items.len() != 2 {
+                    return Err("ERR wrong number of arguments for 'select' command".into());
+                }
+                let index: u32 = extract_string(&items[1])?
+                    .parse()
+                    .map_err(|_| "ERR value is not an integer or out of range")?;
+                Ok(Command::Select(index))
+            }
+            "CLIENT" => Ok(Command::Client),
+            "QUIT" => Ok(Command::Quit),
             _ => Ok(Command::Unknown(cmd_name)),
         }
     }
@@ -400,6 +420,15 @@ impl Command {
                 // Return empty array for client capability handshake
                 Frame::Array(vec![])
             }
+            Command::Select(index) => {
+                if index == 0 {
+                    Frame::Simple("OK".into())
+                } else {
+                    Frame::Error("ERR DB index is out of range".into())
+                }
+            }
+            Command::Client => Frame::Simple("OK".into()),
+            Command::Quit => Frame::Simple("OK".into()),
             Command::Unknown(cmd) => Frame::Error(format!("ERR unknown command '{}'", cmd)),
         }
     }
@@ -458,5 +487,49 @@ mod tests {
         let get_cmd = Command::Get("user:1".into());
         let res = get_cmd.execute(&db);
         assert_eq!(res, Frame::Bulk(Bytes::from("Alice")));
+    }
+
+    #[test]
+    fn test_select_client_quit() {
+        let db = Arc::new(Storage::new());
+
+        let select_frame = Frame::Array(vec![
+            Frame::Bulk(Bytes::from("SELECT")),
+            Frame::Bulk(Bytes::from("0")),
+        ]);
+        let cmd = Command::from_frame(select_frame).unwrap();
+        assert_eq!(cmd.execute(&db), Frame::Simple("OK".into()));
+
+        let select_bad = Frame::Array(vec![
+            Frame::Bulk(Bytes::from("SELECT")),
+            Frame::Bulk(Bytes::from("1")),
+        ]);
+        let cmd = Command::from_frame(select_bad).unwrap();
+        assert_eq!(cmd.execute(&db), Frame::Error("ERR DB index is out of range".into()));
+
+        let client_frame = Frame::Array(vec![
+            Frame::Bulk(Bytes::from("CLIENT")),
+            Frame::Bulk(Bytes::from("SETNAME")),
+            Frame::Bulk(Bytes::from("myclient")),
+        ]);
+        let cmd = Command::from_frame(client_frame).unwrap();
+        assert_eq!(cmd.execute(&db), Frame::Simple("OK".into()));
+
+        let quit_frame = Frame::Array(vec![Frame::Bulk(Bytes::from("QUIT"))]);
+        let cmd = Command::from_frame(quit_frame).unwrap();
+        assert_eq!(cmd.execute(&db), Frame::Simple("OK".into()));
+    }
+
+    #[test]
+    fn test_invalid_expire_zero() {
+        let set_frame = Frame::Array(vec![
+            Frame::Bulk(Bytes::from("SET")),
+            Frame::Bulk(Bytes::from("k")),
+            Frame::Bulk(Bytes::from("v")),
+            Frame::Bulk(Bytes::from("EX")),
+            Frame::Bulk(Bytes::from("0")),
+        ]);
+        let res = Command::from_frame(set_frame);
+        assert_eq!(res, Err("ERR invalid expire time in 'set' command".into()));
     }
 }

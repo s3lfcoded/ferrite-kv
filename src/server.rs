@@ -70,6 +70,8 @@ async fn handle_connection(
             }
         };
 
+        let is_quit = matches!(command, Command::Quit);
+
         // If mutating command and AOF is enabled, log to AOF
         if command.is_mutating()
             && let Some(ref aof_writer) = aof
@@ -80,6 +82,10 @@ async fn handle_connection(
 
         let response = command.execute(&db);
         connection.write_frame(&response).await?;
+
+        if is_quit {
+            break;
+        }
     }
 
     Ok(())

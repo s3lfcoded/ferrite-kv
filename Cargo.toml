@@ -2,6 +2,13 @@
 name = "ferrite-kv"
 version = "0.1.0"
 edition = "2024"
+authors = ["selfcodov <selfcodov@users.noreply.github.com>"]
+description = "High-performance in-memory key-value database with zero-copy RESP2 protocol and asynchronous AOF durability"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/selfcodov/ferrite-kv"
+keywords = ["redis", "database", "in-memory", "cache", "resp"]
+categories = ["database-implementations", "network-programming", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs", "signal"] }
