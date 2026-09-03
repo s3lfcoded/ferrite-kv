@@ -1,0 +1,6 @@
+/target
+*.aof
+*.log
+.DS_Store
+.vscode/
+.idea/
