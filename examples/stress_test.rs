@@ -11,8 +11,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::args().nth(1).unwrap_or_else(|| "6399".to_string());
     let target = format!("127.0.0.1:{}", port);
 
-    let total_operations: usize = 500_000;
-    let concurrency: usize = 100;
+    let total_operations: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000);
+    let concurrency: usize = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
     let ops_per_client = total_operations / concurrency;
 
     println!("=============================================================");
@@ -136,9 +142,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
+    let prog_success = success_count.clone();
+    let prog_total = total_operations;
+    let progress_reporter = tokio::spawn(async move {
+        let mut last = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            let cur = prog_success.load(Ordering::Relaxed);
+            if cur >= prog_total {
+                break;
+            }
+            if cur > last {
+                let delta = cur - last;
+                println!(
+                    "  [Progress] {:>7} / {} ops ({:.1}%) | Current Speed: {:>6} ops/sec",
+                    cur,
+                    prog_total,
+                    (cur as f64 / prog_total as f64) * 100.0,
+                    delta
+                );
+                last = cur;
+            }
+        }
+    });
+
     for handle in handles {
         let _ = handle.await;
     }
+    progress_reporter.abort();
 
     let elapsed = start_time.elapsed();
     let total_done = success_count.load(Ordering::SeqCst);
