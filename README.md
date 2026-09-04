@@ -1,38 +1,12 @@
 # FerriteKV
 
-<p align="center">
-  <strong>A high-performance, concurrent In-Memory Key-Value database written in Rust.</strong>
-  <br />
-  <span>Zero-copy RESP2 protocol engine &bull; 64-way Sharded Locks &bull; Dual-tier TTL &bull; Asynchronous AOF Durability</span>
-</p>
+A lightweight, concurrent in-memory key-value database written in Rust, wire-compatible with Redis (RESP2 protocol).
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-2024_Edition-orange?logo=rust" alt="Rust Edition" />
-  <img src="https://img.shields.io/badge/Protocol-RESP2_Compatible-red" alt="RESP2 Protocol" />
-  <img src="https://img.shields.io/badge/Tests-18_Passed-brightgreen" alt="Tests" />
-  <img src="https://img.shields.io/badge/Dependencies-Minimal-blue" alt="Minimal Dependencies" />
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-</p>
+Built to experiment with zero-copy stream parsing, measure `RwLock` contention across 64 shards under heavy concurrent writes, and implement non-blocking AOF persistence on top of Tokio primitives.
 
 ---
 
-## Overview
-
-**FerriteKV** is an in-memory key-value store engineered for microsecond latency and high concurrency under heavy write loads. Built on the **RESP2** (Redis Serialization Protocol) wire format, FerriteKV is a drop-in substitute for Redis workloads, allowing seamless integration with standard tools like `redis-cli` and official Redis SDKs (Python `redis-py`, Go `go-redis`, Node.js `ioredis`).
-
-### Why FerriteKV?
-
-- **Zero-Copy Streaming RESP Parser:** Implemented from scratch using `bytes::BytesMut` without regexes or extraneous heap allocations. Handles TCP stream fragmentation transparently.
-- **64-Way Sharded Storage:** Eliminates global lock contention. Keys are hashed across 64 independent `std::sync::RwLock` shards, enabling massive concurrent multi-threaded throughput.
-- **Dual-Tier Expiration Engine:**
-  - *Lazy Eviction:* Expired keys are discarded on access with zero memory overhead.
-  - *Active Eviction:* Background asynchronous worker sweeps expired entries on a periodic cadence.
-- **Asynchronous AOF Persistence:** Mutating operations (`SET`, `DEL`, `INCR`, `EXPIRE`, etc.) are queued over non-blocking `tokio::sync::mpsc` channels and synced to disk without holding client request threads.
-- **Zero-Bloat Dependency Policy:** No heavyweight frameworks, no ORMs, no bloated parsing crates. The entire storage engine, concurrency layer, and protocol handlers are crafted using Rust's standard library and idiomatic async primitives.
-
----
-
-## Architecture
+## Architecture & Implementation
 
 ```mermaid
 flowchart TD
@@ -41,78 +15,85 @@ flowchart TD
     Conn --> Parser["Zero-Copy RESP2 Parser"]
     Parser --> Dispatcher["Command Router & Validator"]
     
-    Dispatcher -->|"Read / Write"| Shards["64-Way Sharded Storage Engine\n[RwLock<HashMap<String, Entry>> x 64]"]
+    Dispatcher -->|"Read / Write"| Shards["64-Way Sharded Storage\n[RwLock<HashMap> x 64]"]
     Dispatcher -->|"Mutations"| AOFChan["MPSC Channel (4096 Queue)"]
     
-    AOFChan --> AOFWriter["Background AOF Disk Writer\n(appendonly.aof)"]
+    AOFChan --> AOFWriter["Background AOF Writer\n(appendonly.aof)"]
     Worker["Active TTL Purge Worker\n(250ms Interval)"] -.->|"Sweeps dead keys"| Shards
 ```
 
+* **Zero-copy RESP2 parser:** Streaming frame parser using `bytes::BytesMut`. Handles partial TCP frames and buffer slicing without reallocations.
+* **64-way sharded storage:** Eliminates a single global lock bottleneck. Keys are hashed across 64 independent `std::sync::RwLock<HashMap<String, Entry>>` buckets.
+* **Dual-tier TTL expiration:**
+  * *Lazy expiration:* Expired keys are discarded on access.
+  * *Active expiration:* Background async task periodically inspects shards to reclaim memory.
+* **Non-blocking AOF durability:** Write mutations (`SET`, `DEL`, `INCR`, `EXPIRE`, etc.) are queued over a non-blocking `tokio::sync::mpsc` channel and written sequentially to disk in a dedicated background task.
+* **Minimal dependencies:** Only core async primitives (`tokio`, `bytes`, `tracing`). No heavy frameworks or extraneous crates.
+
 ---
 
-## Performance Benchmarks
+## Benchmarks & Stress Testing
 
-Measured on a standard multi-core machine running 50 concurrent TCP worker tasks performing 100,000 round-trip operations (`SET` and `GET` mix):
+Tested on localhost running 100 concurrent worker tasks executing 1,000,000 mixed operations:
+* 30% persistent `SET`
+* 30% high-frequency TTL storm (`PX 100ms - 300ms`)
+* 20% concurrent `GET`
+* 20% high-contention atomic `INCR` on shared hot keys
 
 | Metric | Result |
 | :--- | :--- |
-| **Total Operations** | **100,000** |
-| **Concurrency** | **50 concurrent connections** |
-| **Total Time** | **1.449 seconds** |
-| **Throughput** | **~69,000+ ops/sec** |
-| **Average Round-Trip Latency** | **0.724 ms** |
+| **Total Operations** | **1,000,000** |
+| **Concurrency** | **100 active connections** |
+| **Total Time** | **17.50 seconds** |
+| **Sustained Throughput** | **57,116 ops/sec** (peaks ~79,000 ops/sec) |
+| **Average Round-Trip Latency** | **1.75 ms** |
+| **AOF Log Generated** | **54.55 MB** |
+| **AOF State Recovery Time** | **0.49 seconds** (500k commands replayed) |
+| **Dropped / Failed Ops** | **0 (0.00%)** |
 
-To reproduce the benchmark on your local environment:
+To run the 1,000,000 operations test yourself:
 ```bash
-# 1. Start FerriteKV in release mode
-cargo run --release
+# 1. Start FerriteKV with AOF enabled
+cargo run --release -- --port 6399 --aof stress.aof
 
-# 2. In another terminal, run the benchmark client
-cargo run --release --example benchmark -- 6379
+# 2. In another terminal, run the stress test (port, total_ops, concurrency)
+cargo run --release --example stress_test -- 6399 1000000 100
 ```
 
 ---
 
 ## Supported Commands
 
-FerriteKV implements a comprehensive core set of RESP commands:
-
 | Category | Commands | Description |
 | :--- | :--- | :--- |
-| **Connection & Meta** | `PING [msg]`, `ECHO msg`, `INFO`, `COMMAND` | Health-check, telemetry, client handshake |
-| **String Operations** | `GET key`, `SET key val [EX s] [PX ms]`, `MGET k1 k2...`, `MSET k1 v1...` | Key-value storage and batch operations |
-| **Atomic Counters** | `INCR key`, `DECR key`, `INCRBY key delta`, `DECRBY key delta` | 64-bit integer atomic arithmetic |
-| **Key Lifecycle** | `DEL key...`, `EXISTS key...`, `EXPIRE key secs`, `TTL key`, `DBSIZE`, `FLUSHDB` | Key management, queries, and TTL inspection |
+| **Connection & Meta** | `PING [msg]`, `ECHO msg`, `INFO`, `COMMAND`, `SELECT`, `CLIENT`, `QUIT` | Health-check, handshake, telemetry |
+| **Strings** | `GET key`, `SET key val [EX s] [PX ms]`, `MGET k1 k2...`, `MSET k1 v1...` | Read, write, batch operations |
+| **Counters** | `INCR key`, `DECR key`, `INCRBY key delta`, `DECRBY key delta` | 64-bit atomic integer arithmetic |
+| **Lifecycle** | `DEL key...`, `EXISTS key...`, `EXPIRE key secs`, `TTL key`, `DBSIZE`, `FLUSHDB` | Key management, TTL inspection, flush |
 
 ---
 
 ## Quick Start
 
-### 1. Build and Run from Source
+### Build and Run
 
-Requires Rust 1.85+ (Edition 2024 supported).
+Requires Rust 1.85+ (2024 Edition).
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/ferrite-kv.git
+git clone https://github.com/s3lfcoded/ferrite-kv.git
 cd ferrite-kv
 
 # Run test suite
 cargo test --all-targets
 
-# Start FerriteKV server on default port 6379
+# Start server on default port 6379
 cargo run --release
+
+# Or with AOF enabled on a custom port
+cargo run --release -- --port 6379 --aof appendonly.aof
 ```
 
-#### Custom Options:
-```bash
-# Run on custom port with Append-Only File persistence enabled
-cargo run --release -- --port 7000 --aof db.aof
-```
-
----
-
-### 2. Connect with `redis-cli`
+### Connect with `redis-cli`
 
 ```bash
 $ redis-cli -p 6379
@@ -126,33 +107,22 @@ OK
 (integer) 118
 127.0.0.1:6379> INCR visits
 (integer) 1
-127.0.0.1:6379> INCRBY visits 10
-(integer) 11
 127.0.0.1:6379> DBSIZE
 (integer) 2
 ```
 
----
-
-### 3. Connect with Python (`redis-py`)
+### Python Example (`redis-py`)
 
 ```python
 import redis
 
-client = redis.Redis(host='localhost', port=6379, decode_responses=True)
-
-client.set("user:100", "Alice", ex=60)
-print(client.get("user:100"))  # Alice
-print(client.ttl("user:100"))  # 60
-client.incrby("counter", 5)
-print(client.get("counter"))   # 5
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+r.set("user:100", "Alice", ex=60)
+print(r.get("user:100"))  # Alice
+print(r.ttl("user:100"))  # 60
 ```
 
----
-
-### 4. Docker Deployment
-
-Build and run using the lightweight multi-stage Docker container:
+### Docker
 
 ```bash
 docker build -t ferrite-kv .
@@ -161,14 +131,6 @@ docker run -d -p 6379:6379 --name ferrite ferrite-kv
 
 ---
 
-## Code Quality & Engineering Standards
-
-- **Strict Linting:** Enforced with `cargo clippy --all-targets -- -D warnings` (zero warnings allowed).
-- **Automated CI/CD:** GitHub Actions workflow verifies formatting (`rustfmt`), static analysis (`clippy`), unit tests, and end-to-end integration tests on every commit and pull request.
-- **Resilience:** Full test suite verifying protocol framing edge-cases, partial TCP packet delivery, active/passive expiration, and crash-recovery state reconstruction via AOF logs.
-
----
-
 ## License
 
-Distributed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
